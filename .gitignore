@@ -1,0 +1,16 @@
+.idea/
+*.log
+*.tmp
+env/
+logs/
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+report.csv
+report.json
+.env
+
+*.sqlite3
