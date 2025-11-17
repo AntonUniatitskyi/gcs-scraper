@@ -4,9 +4,10 @@ from urllib.parse import urlparse
 import os
 import csv
 import json
-from config import TRUSTED_DOMAINS, FAKE_DOMAINS, PLATFORM_DOMAINS
+from config import TRUSTED_DOMAINS, FAKE_DOMAINS, PLATFORM_DOMAINS, CLICKBAIT_TRIGGERS
 from loguru import logger
 import dateparser
+from newspaper import Article
 
 def get_domain_rating(url):
     try:
@@ -66,59 +67,93 @@ def save_report(report_data):
     except Exception as e:
         logger.error(f"Ошибка сохранения CSV: {e}")
 
+def analyze_title_sentiment(title: str) -> str:
+    if not title:
+        return ""
+    title_lower = title.lower()
+    for trigger in CLICKBAIT_TRIGGERS:
+        if trigger in title_lower:
+            logger.debug(f"Найдено триггер-слово: '{trigger}'")
+            return " (Кликбейт: Триггер-слово)"
+    if '!!!' in title or '???' in title or '!?' in title:
+        logger.debug("Найдена чрезмерная пунктуация")
+        return " (Кликбейт: Пунктуация)"
+    if title.isupper() and len(title) > 10:
+        logger.debug("Заголовок написан в ALL CAPS")
+        return " (Кликбейт: ALL CAPS)"
+    return ""
 
 def run_parser(search_results_data):
-
     links = [item["link"] for item in search_results_data.get("items", [])]
 
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'DNT': '1',
+    'Upgrade-Insecure-Requests': '1',
+}
 
     final_report_data = []
     for url in links:
         logger.info(f"Обрабатываем: {url}")
-        rating = get_domain_rating(url)
+        domain_rating = get_domain_rating(url)
         report_item = {
             'url': url,
             'title': None,
             'published_date': None,
-            'rating': rating,
+            'rating': domain_rating,
             'status': 'Failed' # По умолчанию
         }
         try:
             response = requests.get(url, headers=headers, timeout=5)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, "lxml")
-            title_tag = soup.find("title")
-            h1_tag = soup.find("h1")
-            title = title_tag.text.strip() if title_tag else (h1_tag.text.strip() if h1_tag else None)
+            article = Article(url)
+            article.set_html(response.text)
+            article.parse()
+
+            title = article.title
+            if not title:
+                logger.debug("Пробую найти заголовок вручную")
+                title_tag = soup.find("title")
+                h1_tag = soup.find("h1")
+                title = title_tag.text.strip() if title_tag else (h1_tag.text.strip() if h1_tag else None)
             if title:
                 logger.success(f"Название: {title}")
+                report_item['title'] = title
             else:
                 logger.warning("Название не найдено")
-            raw_date_str = extract_date(soup)
-            if raw_date_str:
-                # А dateparser ее "нормализует"
-                parsed_date = dateparser.parse(str(raw_date_str))
-                if parsed_date:
-                    logger.success(f"Дата публикации: {parsed_date.isoformat()}")
-                    report_item['published_date'] = parsed_date.isoformat()
-                else:
-                    logger.warning(f"Найдена строка даты, но не удалось разобрать: {raw_date_str}")
+
+            sentiment_tag = analyze_title_sentiment(title)
+            final_rating = f"{domain_rating}{sentiment_tag}"
+
+            publish_date = article.publish_date
+            if publish_date:
+                iso_date = publish_date.isoformat()
+                logger.success(f"Дата публикации: {iso_date}")
+                report_item['published_date'] = iso_date
             else:
-                logger.warning("Дата публикации не найдена")
+                logger.debug("Пробую найти дату вручную")
+                raw_date_str = extract_date(soup)
+                if raw_date_str:
+                    parsed_date = dateparser.parse(str(raw_date_str))
+                    if parsed_date:
+                        iso_date = parsed_date.isoformat()
+                        logger.success(f"Дата публикации: {iso_date}")
+                        report_item['published_date'] = iso_date
+                    else:
+                        logger.warning(f"Найдена строка даты, но не удалось разобрать: {raw_date_str}")
+                else:
+                    logger.warning("Дата публикации не найдена")
             report_item['status'] = 'Success'
-            logger.success(f"{rating}")
+            logger.success(f"{final_rating}")
             print("\n")
 
-        except requests.RequestException as e:
+        except Exception as e:
             logger.error(f"Не удалось загрузить {url}: {e}")
             report_item['status'] = f"Failed: {e}"
             print("\n")
 
-        # 7. Добавляем результат в общий список
         final_report_data.append(report_item)
-
-    # 8. После окончания цикла - сохраняем всё
     save_report(final_report_data)

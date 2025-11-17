@@ -21,3 +21,16 @@ PLATFORM_DOMAINS = {
     'facebook.com', 'twitter.com', 't.me', 'youtube.com',
     'blogspot.com', 'livejournal.com', 'teletype.in'
 }
+
+CLICKBAIT_TRIGGERS = {
+    # Триггер-слова
+    'шок',
+    'сенсация',
+    'скандал',
+    'узнай',
+    'вы не поверите',
+    'раскрыты',
+    'секрет',
+    'только у нас',
+    'подробности',
+}
