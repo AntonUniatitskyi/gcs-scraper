@@ -4,10 +4,11 @@ from loguru import logger
 import argparse
 from logger_config import setup_logger
 import page_parser as parser
+import asyncio
 
 
 def main():
-    setup_logger() 
+    setup_logger()
     arg_parser = argparse.ArgumentParser(description="Анализ и поиск статей по запросу.")
     arg_parser.add_argument(
         '-q', '--query',
@@ -38,7 +39,7 @@ def main():
             print(f"Ссылка: {item['link']}")
             print(f"Фрагмент: {item['snippet']}")
             print("-" * 30)
-        parser.run_parser(results_data)
+        asyncio.run(parser.run_parser(results_data))
 
     logger.info("Приложение завершило работу.")
 
