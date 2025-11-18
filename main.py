@@ -66,7 +66,7 @@ def main():
         return
     results_data = client.search(query, num_results, show_logs)
     if results_data:
-        asyncio.run(parser.run_parser(results_data, show_logs))
+        asyncio.run(parser.run_parser(results_data, query, show_logs))
     if show_logs:
         logger.info("Приложение завершило работу.")
 

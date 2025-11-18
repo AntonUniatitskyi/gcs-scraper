@@ -16,6 +16,8 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.table import Table
 from rich import box
+import sqlite3
+import datetime
 
 console = Console()
 genai.configure(api_key=os.getenv("GEMINI_KEY"))
@@ -28,18 +30,18 @@ def print_rich_card(item: dict):
     ai_text = item.get('ai_analysis')
 
     ai_score_display = ""
-    if ai_text and "Пропущено" not in ai_text and "короткий" not in ai_text:
-        # Ищем "85%", "100%", "5%" в тексте
-        match = re.search(r'SCORE:\s*(\d{1,3})%', ai_text, re.IGNORECASE)
-        if match:
-            score = int(match.group(1))
-            if score >= 80:
-                ai_score_display = f" | [bold green]AI: {score}%[/bold green]"
-            elif score >= 50:
-                ai_score_display = f" | [bold yellow]AI: {score}%[/bold yellow]"
-            else:
-                ai_score_display = f" | [bold red]AI: {score}%[/bold red]"
-            ai_text = re.sub(r'SCORE:\s*\d{1,3}%\s*', '', ai_text, flags=re.IGNORECASE).strip()
+    # if ai_text and "Пропущено" not in ai_text and "короткий" not in ai_text:
+    #     # Ищем "85%", "100%", "5%" в тексте
+    #     match = re.search(r'SCORE:\s*(\d{1,3})%', ai_text, re.IGNORECASE)
+    #     if match:
+    #         score = int(match.group(1))
+    #         if score >= 80:
+    #             ai_score_display = f" | [bold green]AI: {score}%[/bold green]"
+    #         elif score >= 50:
+    #             ai_score_display = f" | [bold yellow]AI: {score}%[/bold yellow]"
+    #         else:
+    #             ai_score_display = f" | [bold red]AI: {score}%[/bold red]"
+    #         ai_text = re.sub(r'SCORE:\s*\d{1,3}%\s*', '', ai_text, flags=re.IGNORECASE).strip()
 
     border_style = "white"
     if "Высокое доверие" in rating:
@@ -63,9 +65,19 @@ def print_rich_card(item: dict):
         .replace("Платформа", "[yellow]Платформа[/yellow]") \
         .replace("Неизвестен", "[grey70]Неизвестен[/grey70]")
 
-    content.add_row("🛡️ Рейтинг:", f"{rating_colored}{ai_score_display}")
+    def color_ai_score(match):
+        score = int(match.group(1))
+        if score >= 80: color = "bold green"
+        elif score >= 50: color = "bold yellow"
+        else: color = "bold red"
+        return f"| [{color}]AI: {score}%[/{color}]"
+
+    rating_colored = re.sub(r'\|\s*AI:\s*(\d{1,3})%', color_ai_score, rating_colored)
+
+    content.add_row("🛡️ Рейтинг:", f"{rating_colored}")
 
     if ai_text and "Пропущено" not in ai_text and "короткий" not in ai_text:
+        clean_text = re.sub(r'SCORE:\s*\d{1,3}%\s*', '', ai_text, flags=re.IGNORECASE)
         clean_text = ai_text.replace("**", "").replace("###", "").replace("\n", " ").strip()
         ai_preview = clean_text[:150] + "..."
         content.add_row("🤖 Мнение:", f"[italic grey70]{ai_preview}[/italic grey70]")
@@ -148,7 +160,48 @@ def extract_date(soup):
             return meta_tag["content"]
     return None
 
-def save_report(report_data, show_logs: bool):
+def save_report(report_data: list, query: str, show_logs: bool):
+    if not report_data: return
+
+    try:
+        con = sqlite3.connect('data.db')
+        cursor = con.cursor()
+        sql = '''
+        INSERT OR REPLACE INTO articles
+        (url, title, published_date, rating, status, search_query, retrieved_at, ai_analysis)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        '''
+        saved_count = 0
+        now_iso = datetime.datetime.now().isoformat()
+        for item in report_data:
+            if not item: continue
+
+            data_tuple = (
+                item.get('url'),
+                item.get('title'),
+                item.get('published_date'),
+                item.get('rating'),
+                item.get('status'),
+                query,      # Сохраняем, по какому запросу нашли
+                now_iso,    # Сохраняем, когда нашли
+                item.get('ai_analysis')
+            )
+            try:
+                cursor.execute(sql, data_tuple)
+                saved_count += 1
+            except Exception as db_err:
+                if show_logs: logger.error(f"Ошибка записи в БД: {db_err}")
+        con.commit()
+        cursor.close()
+        if show_logs:
+            logger.success(f"Сохранено {saved_count} записей в 'data.db'.")
+        else:
+            console.print(f"\n[bold green]💾 База знаний обновлена: +{saved_count} записей в data.db[/bold green]")
+
+    except Exception as e:
+        if show_logs: logger.error(f"Глобальная ошибка БД: {e}")
+        else: console.print(f"[red]❌ Ошибка базы данных: {e}[/red]")
+
     if not report_data:
         if show_logs:
             logger.warning("Нет данных для сохранения отчета.")
@@ -250,6 +303,7 @@ async def fetch_and_parse_url(client: httpx.AsyncClient, url: str, semaphore: as
             report_item['title'] = title
             sentiment_tag = analyze_title_sentiment(title)
             final_rating = f"{domain_rating}{sentiment_tag}{ai_score_short}"
+            report_item['rating'] = final_rating
 
             publish_date = article.publish_date
             if publish_date:
@@ -288,7 +342,7 @@ async def fetch_and_parse_url(client: httpx.AsyncClient, url: str, semaphore: as
 
         return report_item
 
-async def run_parser(search_results_data, show_logs: bool):
+async def run_parser(search_results_data, query, show_logs: bool):
     links = [item["link"] for item in search_results_data.get("items", [])]
 
     headers = {
@@ -309,4 +363,4 @@ async def run_parser(search_results_data, show_logs: bool):
         if show_logs: logger.info(f"Запускаю {len(tasks)} задач одновременно...")
         final_report_data = await asyncio.gather(*tasks)
 
-    save_report(final_report_data, show_logs)
+    save_report(final_report_data, query, show_logs)
