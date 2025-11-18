@@ -15,15 +15,15 @@ class SearchClient:
 
         self.url = "https://www.googleapis.com/customsearch/v1"
 
-    def search(self, query: str, num_results: int = 5):
+    def search(self, query: str, num_results: int = 5, show_logs: bool = True):
         params = {
             'key': self.api_key,
             'cx': self.search_engine_id,
             'q': query,
             'num': num_results
         }
-
-        logger.info(f"Выполняю поиск: '{query}'")
+        if show_logs:
+            logger.info(f"Выполняю поиск: '{query}'")
         response = None
 
         try:
@@ -32,19 +32,26 @@ class SearchClient:
             data = response.json()
 
             if 'items' not in data:
-                logger.warning("Результаты не найдены.")
+                if show_logs:
+                    logger.warning("Результаты не найдены.")
                 return None
-
-            logger.success(f"Найдено результатов: {len(data['items'])}")
+            if show_logs:
+                logger.success(f"Найдено результатов: {len(data['items'])}")
             return data
 
         except requests.exceptions.HTTPError as e:
-            logger.error(f"HTTP ошибка: {e}")
-            if response:
-                logger.debug(response.text)
+            if show_logs:
+                logger.error(f"HTTP ошибка: {e}")
+                if response:
+                    logger.debug(response.text)
+            else:
+                print(f"❌ Ошибка поиска: {e}")
 
         except requests.exceptions.RequestException as e:
-            logger.error(f"Ошибка запроса: {e}")
+            if show_logs:
+                logger.error(f"Ошибка запроса: {e}")
+            else:
+                print(f"❌ Ошибка запроса: {e}")
 
         return None
 

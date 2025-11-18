@@ -5,6 +5,7 @@ load_dotenv()
 
 API_KEY = os.getenv("API_KEY")
 SEARCH_ENGINE_ID = os.getenv("SEARCH_ENGINE_ID")
+GEMINI_KEY = os.getenv("GEMINI_KEY")
 
 
 TRUSTED_DOMAINS = {
