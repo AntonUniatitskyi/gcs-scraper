@@ -364,3 +364,33 @@ async def run_parser(search_results_data, query, show_logs: bool):
         final_report_data = await asyncio.gather(*tasks)
 
     save_report(final_report_data, query, show_logs)
+
+
+def setup_dtabase(show_logs: bool):
+    try:
+        conn = sqlite3.connect('data.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS articles (
+            url TEXT PRIMARY KEY,
+            title TEXT,
+            published_date TEXT,
+            rating TEXT,
+            status TEXT,
+            search_query TEXT,
+            retrieved_at TEXT,
+            ai_analysis TEXT
+        )
+        ''')
+        try:
+            cursor.execute("ALTER TABLE articles ADD COLUMN ai_analysis TEXT")
+            conn.commit()
+            if show_logs: logger.info("Столбец 'ai_analysis' успешно добавлен/проверен.")
+        except sqlite3.OperationalError:
+            pass
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        if show_logs: logger.critical(f"Не удалось создать базу данных: {e}")
+        print(f"CRITICAL: Не удалось создать базу данных: {e}")

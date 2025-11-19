@@ -6,6 +6,7 @@ from logger_config import setup_logger
 import page_parser as parser
 import asyncio
 import sqlite3
+import subprocess
 
 def setup_dtabase(show_logs: bool):
     try:
@@ -23,11 +24,19 @@ def setup_dtabase(show_logs: bool):
             ai_analysis TEXT
         )
         ''')
+        try:
+            # Пытаемся добавить столбец
+            cursor.execute("ALTER TABLE articles ADD COLUMN ai_analysis TEXT")
+            conn.commit()
+            if show_logs: logger.info("Столбец 'ai_analysis' успешно добавлен/проверен.")
+        except sqlite3.OperationalError:
+            # Игнорируем ошибку: она возникает, когда столбец уже есть.
+            pass
+
         conn.commit()
-        cursor.close()
+        conn.close()
     except Exception as e:
-        if show_logs:
-            logger.critical(f"Не удалось создать базу данных: {e}")
+        if show_logs: logger.critical(f"Не удалось создать базу данных: {e}")
         exit()
 
 def main():
@@ -36,7 +45,7 @@ def main():
     arg_parser.add_argument(
         '-q', '--query',
         type=str,
-        required=True,
+        required=False,
         help="Поисковый запрос (в кавычках, если из нескольких слов)"
     )
     arg_parser.add_argument(
@@ -50,11 +59,20 @@ def main():
         action='store_true',
         help="Включить режим логов (вместо красивых рамок)"
     )
+    arg_parser.add_argument(
+        '-w', '--web',
+        action='store_true',
+        help="Открыть веб-интерфейс после выполнения поиска"
+    )
     args = arg_parser.parse_args()
     query = args.query
     num_results = args.num
     show_logs = args.logs
     setup_dtabase(show_logs)
+    if args.web:
+        if show_logs: logger.info("Запуск веб-интерфейса Streamlit...")
+        subprocess.run(["streamlit", "run", "web_app.py"])
+        return
     if show_logs:
         logger.info(f"Запуск с запросом: '{query}' (результатов: {num_results})")
     else:
