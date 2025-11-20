@@ -7,40 +7,12 @@ import page_parser as parser
 import asyncio
 import sqlite3
 import subprocess
+from database import DatabaseHandler
 
-def setup_dtabase(show_logs: bool):
-    try:
-        conn = sqlite3.connect('data.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS articles (
-            url TEXT PRIMARY KEY,
-            title TEXT,
-            published_date TEXT,
-            rating TEXT,
-            status TEXT,
-            search_query TEXT,
-            retrieved_at TEXT,
-            ai_analysis TEXT
-        )
-        ''')
-        try:
-            # Пытаемся добавить столбец
-            cursor.execute("ALTER TABLE articles ADD COLUMN ai_analysis TEXT")
-            conn.commit()
-            if show_logs: logger.info("Столбец 'ai_analysis' успешно добавлен/проверен.")
-        except sqlite3.OperationalError:
-            # Игнорируем ошибку: она возникает, когда столбец уже есть.
-            pass
-
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        if show_logs: logger.critical(f"Не удалось создать базу данных: {e}")
-        exit()
 
 def main():
     setup_logger()
+    db = DatabaseHandler()
     arg_parser = argparse.ArgumentParser(description="Анализ и поиск статей по запросу.")
     arg_parser.add_argument(
         '-q', '--query',
@@ -68,7 +40,6 @@ def main():
     query = args.query
     num_results = args.num
     show_logs = args.logs
-    setup_dtabase(show_logs)
     if args.web:
         if show_logs: logger.info("Запуск веб-интерфейса Streamlit...")
         subprocess.run(["streamlit", "run", "web_app.py"])

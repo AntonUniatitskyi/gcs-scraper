@@ -5,6 +5,8 @@ import pandas as pd
 import page_parser as parser
 from search_client import SearchClient
 from config import API_KEY, SEARCH_ENGINE_ID
+from database import DatabaseHandler
+import plotly.express as px
 
 def color_rating(val):
     if 'Высокое доверие' in val:
@@ -17,12 +19,7 @@ def color_rating(val):
 st.set_page_config(page_title="Анализатор Новостей с AI", layout="wide")
 st.title("🛡️ AI-Анализатор Новостей и Пропаганды")
 
-def get_articles_from_db():
-    conn = sqlite3.connect('data.db')
-    query = "SELECT url, title, published_date, rating, ai_analysis, retrieved_at FROM articles ORDER BY retrieved_at DESC"
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-    return df
+db = DatabaseHandler()
 
 async def run_analysis(query, num_results):
     st.session_state.is_running = True
@@ -71,12 +68,24 @@ with st.sidebar:
                     loop.run_until_complete(run_analysis(search_query, num_results))
                 else:
                     st.error(f"Асинхронная ошибка: {e}")
+    st.markdown("---")
+    st.subheader("📊 Статистика Базы")
+
+    stats = db.get_stats()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Всего статей", stats['total'])
+    with col2:
+        st.metric("Доверенные", stats['trusted'])
+
+    st.metric("Подозрительные / Пропаганда", stats['fake'], delta_color="inverse")
 
 if st.session_state.report_data:
     st.subheader("📊 Результаты Текущего Анализа")
     df_report = pd.DataFrame(st.session_state.report_data)
     st.dataframe(
-        df_report.style.applymap(color_rating, subset=['rating']),
+        df_report.style.applymap(color_rating, subset=['rating'] ), # type: ignore[attr-defined]
         use_container_width=True,
         column_config={
             "url": st.column_config.LinkColumn("URL", display_text="Открыть ссылку"),
@@ -86,11 +95,10 @@ if st.session_state.report_data:
 
 st.markdown("---")
 st.subheader("📚 История Анализов (data.db)")
-parser.setup_dtabase(show_logs=False)
-df_history = get_articles_from_db()
+df_history = db.get_all_articles_df()
 if not df_history.empty:
     st.dataframe(
-        df_history.style.applymap(color_rating, subset=['rating']),
+        df_history.style.applymap(color_rating, subset=['rating']), # type: ignore[attr-defined]
         use_container_width=True,
         column_config={
             "url": st.column_config.LinkColumn("URL", display_text="Открыть ссылку"),
@@ -98,5 +106,65 @@ if not df_history.empty:
             "retrieved_at": st.column_config.DatetimeColumn("Дата Анализа", format="YYYY-MM-DD HH:mm:ss")
         }
     )
+else:
+    st.info("База данных пока пуста.")
+
+df_history = db.get_all_articles_df()
+
+if not df_history.empty:
+    df_history['clean_rating'] = df_history['rating'].astype(str).apply(
+        lambda x: x.split('|')[0].replace('Рейтинг:', '').split('(')[0].strip()
+    )
+
+    df_history['published_date'] = df_history['published_date'].astype(str)
+
+    df_history['published_date_dt'] = pd.to_datetime(
+        df_history['published_date'],
+        errors='coerce',
+        utc=True
+    )
+
+    df_history['date_parsed'] = df_history['published_date_dt'].dt.date
+
+    st.markdown("### 📈 Визуализация данных")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        rating_counts = df_history['clean_rating'].value_counts().reset_index()
+        rating_counts.columns = ['Тип источника', 'Количество']
+
+        fig_pie = px.pie(
+            rating_counts,
+            values='Количество',
+            names='Тип источника',
+            title='Распределение источников',
+            hole=0.4,
+            color='Тип источника',
+            color_discrete_map={
+                'Высокое доверие': '#28a745',
+                'Низкое доверие / Пропаганда': '#dc3545',
+                'Платформа': '#ffc107',
+                'Неизвестен': '#6c757d'
+            }
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+    with col2:
+        valid_dates = df_history.dropna(subset=['date_parsed'])
+        if not valid_dates.empty:
+            date_counts = valid_dates['date_parsed'].value_counts().reset_index()
+            date_counts.columns = ['Дата публикации', 'Количество статей']
+            date_counts = date_counts.sort_values('Дата публикации')
+
+            fig_bar = px.bar(
+                date_counts,
+                x='Дата публикации',
+                y='Количество статей',
+                title='Хронология публикаций',
+                color_discrete_sequence=['#3498db']
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
+        else:
+            st.info("Недостаточно данных с датами для построения графика.")
 else:
     st.info("База данных пока пуста.")

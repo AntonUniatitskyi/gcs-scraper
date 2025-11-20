@@ -7,10 +7,12 @@ import csv
 import json
 import re
 from config import TRUSTED_DOMAINS, FAKE_DOMAINS, PLATFORM_DOMAINS, CLICKBAIT_TRIGGERS
+from database import DatabaseHandler
 from loguru import logger
 import dateparser
+from typing import Optional
 from newspaper import Article
-import google.generativeai as genai
+from google import genai
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
@@ -20,7 +22,7 @@ import sqlite3
 import datetime
 
 console = Console()
-genai.configure(api_key=os.getenv("GEMINI_KEY"))
+client = genai.Client(api_key=os.getenv("GEMINI_KEY"))
 
 def print_rich_card(item: dict):
     title = item.get('title') or "Без названия"
@@ -28,20 +30,6 @@ def print_rich_card(item: dict):
     rating = item.get('rating', '')
     date = item.get('published_date') or "Неизвестно"
     ai_text = item.get('ai_analysis')
-
-    ai_score_display = ""
-    # if ai_text and "Пропущено" not in ai_text and "короткий" not in ai_text:
-    #     # Ищем "85%", "100%", "5%" в тексте
-    #     match = re.search(r'SCORE:\s*(\d{1,3})%', ai_text, re.IGNORECASE)
-    #     if match:
-    #         score = int(match.group(1))
-    #         if score >= 80:
-    #             ai_score_display = f" | [bold green]AI: {score}%[/bold green]"
-    #         elif score >= 50:
-    #             ai_score_display = f" | [bold yellow]AI: {score}%[/bold yellow]"
-    #         else:
-    #             ai_score_display = f" | [bold red]AI: {score}%[/bold red]"
-    #         ai_text = re.sub(r'SCORE:\s*\d{1,3}%\s*', '', ai_text, flags=re.IGNORECASE).strip()
 
     border_style = "white"
     if "Высокое доверие" in rating:
@@ -93,10 +81,10 @@ def print_rich_card(item: dict):
 
     console.print(panel)
 
-async def get_ai_analyzis(text: str) -> str:
+async def get_ai_analyzis(text: str) -> Optional[str]:
     if not text or len(text) < 100:
         return None
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    # model = genai.GenerativeModel('gemini-2.5-flash')
     prompt = f"""
     Проанализируй этот новостной текст.
     ВАЖНО: Твой ответ ОБЯЗАН начинаться строго с такой строки:
@@ -113,7 +101,9 @@ async def get_ai_analyzis(text: str) -> str:
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            response = await model.generate_content_async(prompt)
+            response = await client.aio.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt)
             return response.text
         except Exception as e:
             if "429" in str(e):
@@ -163,44 +153,21 @@ def extract_date(soup):
 def save_report(report_data: list, query: str, show_logs: bool):
     if not report_data: return
 
-    try:
-        con = sqlite3.connect('data.db')
-        cursor = con.cursor()
-        sql = '''
-        INSERT OR REPLACE INTO articles
-        (url, title, published_date, rating, status, search_query, retrieved_at, ai_analysis)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        '''
-        saved_count = 0
-        now_iso = datetime.datetime.now().isoformat()
-        for item in report_data:
-            if not item: continue
+    db = DatabaseHandler()
+    saved_count = 0
 
-            data_tuple = (
-                item.get('url'),
-                item.get('title'),
-                item.get('published_date'),
-                item.get('rating'),
-                item.get('status'),
-                query,      # Сохраняем, по какому запросу нашли
-                now_iso,    # Сохраняем, когда нашли
-                item.get('ai_analysis')
-            )
-            try:
-                cursor.execute(sql, data_tuple)
+    for item in report_data:
+        if item and item.get('status') != 'Failed':
+            if db.save_article(item, query):
                 saved_count += 1
-            except Exception as db_err:
-                if show_logs: logger.error(f"Ошибка записи в БД: {db_err}")
-        con.commit()
-        cursor.close()
-        if show_logs:
-            logger.success(f"Сохранено {saved_count} записей в 'data.db'.")
-        else:
-            console.print(f"\n[bold green]💾 База знаний обновлена: +{saved_count} записей в data.db[/bold green]")
 
-    except Exception as e:
-        if show_logs: logger.error(f"Глобальная ошибка БД: {e}")
-        else: console.print(f"[red]❌ Ошибка базы данных: {e}[/red]")
+    if show_logs:
+        logger.success(f"Сохранено {saved_count} записей в базу через ORM.")
+    else:
+        try:
+            console.print(f"\n[bold green]💾 База данных обновлена: +{saved_count} записей[/bold green]")
+        except ImportError:
+            print(f"База данных обновлена: +{saved_count} записей")
 
     if not report_data:
         if show_logs:
@@ -307,7 +274,10 @@ async def fetch_and_parse_url(client: httpx.AsyncClient, url: str, semaphore: as
 
             publish_date = article.publish_date
             if publish_date:
-                iso_date = publish_date.isoformat()
+                if isinstance(publish_date, datetime.datetime):
+                    iso_date = publish_date.isoformat()
+                else:
+                    iso_date = str(publish_date)
                 if show_logs: logger.success(f"Дата публикации: {iso_date}")
                 report_item['published_date'] = iso_date
             else:
@@ -364,33 +334,3 @@ async def run_parser(search_results_data, query, show_logs: bool):
         final_report_data = await asyncio.gather(*tasks)
 
     save_report(final_report_data, query, show_logs)
-
-
-def setup_dtabase(show_logs: bool):
-    try:
-        conn = sqlite3.connect('data.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS articles (
-            url TEXT PRIMARY KEY,
-            title TEXT,
-            published_date TEXT,
-            rating TEXT,
-            status TEXT,
-            search_query TEXT,
-            retrieved_at TEXT,
-            ai_analysis TEXT
-        )
-        ''')
-        try:
-            cursor.execute("ALTER TABLE articles ADD COLUMN ai_analysis TEXT")
-            conn.commit()
-            if show_logs: logger.info("Столбец 'ai_analysis' успешно добавлен/проверен.")
-        except sqlite3.OperationalError:
-            pass
-
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        if show_logs: logger.critical(f"Не удалось создать базу данных: {e}")
-        print(f"CRITICAL: Не удалось создать базу данных: {e}")
