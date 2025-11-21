@@ -18,11 +18,9 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.table import Table
 from rich import box
-import sqlite3
 import datetime
 
 console = Console()
-client = genai.Client(api_key=os.getenv("GEMINI_KEY"))
 
 def print_rich_card(item: dict):
     title = item.get('title') or "Без названия"
@@ -101,6 +99,7 @@ async def get_ai_analyzis(text: str) -> Optional[str]:
     max_retries = 3
     for attempt in range(max_retries):
         try:
+            client = genai.Client(api_key=os.getenv("GEMINI_KEY"))
             response = await client.aio.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt)
@@ -229,7 +228,8 @@ async def fetch_and_parse_url(client: httpx.AsyncClient, url: str, semaphore: as
             'published_date': None,
             'rating': domain_rating,
             'status': 'Failed', # По умолчанию
-            'ai_analysis': None
+            'ai_analysis': None,
+            'text_content': None
         }
         ai_score_short = ""
         try:
@@ -247,6 +247,7 @@ async def fetch_and_parse_url(client: httpx.AsyncClient, url: str, semaphore: as
                 report_item['ai_analysis'] = "Текст слишком короткий для анализа"
                 if show_logs: logger.warning("AI пропущен (Мало текста)")
             else:
+                report_item['text_content'] = article.text
                 if show_logs: logger.info("Отправляю текст в AI...")
                 ai_result = await get_ai_analyzis(article.text)
                 if ai_result:
@@ -316,21 +317,79 @@ async def run_parser(search_results_data, query, show_logs: bool):
     links = [item["link"] for item in search_results_data.get("items", [])]
 
     headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'DNT': '1',
-    'Upgrade-Insecure-Requests': '1',
-}
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+    }
 
     semaphore = asyncio.Semaphore(3)
     tasks = []
     if not show_logs:
         console.print(f"[bold cyan]🚀 Запуск анализа для {len(links)} ссылок...[/bold cyan]\n")
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
+    async with httpx.AsyncClient(headers=headers, follow_redirects=True, verify=False, http2=True, trust_env=False,) as client:
         for url in links:
             tasks.append(fetch_and_parse_url(client, url, semaphore, show_logs))
         if show_logs: logger.info(f"Запускаю {len(tasks)} задач одновременно...")
         final_report_data = await asyncio.gather(*tasks)
 
     save_report(final_report_data, query, show_logs)
+    return final_report_data
+
+
+async def get_cross_check_analysis(articles_data: list ) -> str:
+    valid_articles = [a for a in articles_data if a.get('text_content')]
+
+    if len(valid_articles) < 2:
+        return "⚠️ Для кросс-анализа нужно минимум 2 успешные статьи с текстом."
+
+    context_text = ""
+    for i, art in enumerate(valid_articles):
+        text_snippet = art['text_content'][:4000]
+        domain = urlparse(art['url']).netloc
+        context_text += f"\n=== ИСТОЧНИК {i+1} ({domain}) ===\n{text_snippet}\n"
+
+    prompt = f"""
+    Ты — профессиональный аналитик медиа и OSINT-специалист.
+    Твоя задача: провести перекрестный анализ (Cross-Check) представленных ниже статей об одном или схожих событиях.
+
+    ИСХОДНЫЕ ДАННЫЕ:
+    {context_text}
+
+    ЗАДАЧА:
+    Напиши сводный отчет в формате Markdown.
+
+    СТРУКТУРА ОТЧЕТА:
+    1. 📝 **Краткая суть события**: (О чем вообще речь, 2-3 предложения, факты, подтвержденные всеми).
+    2. ⚖️ **Сравнение нарративов**:
+       - Как разные источники подают информацию?
+       - Есть ли эмоциональная окраска (кто обвиняет, кто защищает)?
+    3. 🔍 **Противоречия и Умолчания**:
+       - В чем источники расходятся (цифры, даты, виновники)?
+       - Есть ли факты, которые один источник выпячивает, а другой скрывает?
+    4. 🏆 **Вердикт**:
+       - Какой источник выглядит наиболее нейтральным и фактологическим?
+       - Есть ли признаки скоординированной пропаганды?
+
+    Пиши четко, используй буллиты. Не лей воду.
+    """
+
+    try:
+        client = genai.Client(api_key=os.getenv("GEMINI_KEY"))
+        response = await client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt
+        )
+        if response is None or not hasattr(response, "text") or response.text is None:
+            return "❌ Ошибка: AI не вернул текст"
+        return response.text
+
+    except Exception as e:
+        logger.error(f"Ошибка кросс-анализа: {e}")
+        return f"❌ Не удалось провести кросс-анализ: {e}"
