@@ -108,6 +108,7 @@ if st.session_state.report_data:
             if not has_text:
                 st.error("⚠️ Нет текстов для анализа. Возможно, сайты заблокировали парсер.")
             else:
+                cross_check_result = ""
                 with st.spinner("🤖 AI читает статьи и ищет истину..."):
                     try:
                         loop = asyncio.new_event_loop()
@@ -120,21 +121,43 @@ if st.session_state.report_data:
                         st.success("Готово!")
                         with st.container(border=True):
                             st.markdown(cross_check_result)
+
+                            # pdf_data = create_pdf(
+                            #     query=search_query,
+                            #     articles=current_data,
+                            #     cross_check_text=cross_check_result
+                            # )
+
+                            # st.download_button(
+                            #     label="📄 Скачать PDF отчет",
+                            #     data=pdf_data,
+                            #     file_name="analysis_report.pdf",
+                            #     mime="application/pdf",
+                            #     type="primary"
+                            # )
+                    except Exception as e:
+                        st.error(f"Ошибка кросс-анализа: {e}")
+                if cross_check_result:
+                    try:
+                        with st.spinner("📄 Верстаю PDF отчет..."):
                             pdf_data = create_pdf(
                                 query=search_query,
                                 articles=current_data,
                                 cross_check_text=cross_check_result
                             )
 
-                            st.download_button(
-                                label="📄 Скачать PDF отчет",
-                                data=pdf_data,
-                                file_name="analysis_report.pdf",
-                                mime="application/pdf",
-                                type="primary"
-                            )
+                        st.download_button(
+                            label="📄 Скачать PDF отчет",
+                            data=pdf_data,
+                            file_name="analysis_report.pdf",
+                            mime="application/pdf",
+                            type="primary"
+                        )
+                    except IndexError:
+                        st.error("❌ Ошибка структуры данных при создании PDF (IndexError).")
+                        # st.warning("Совет: Скорее всего, проблема в report_generator.py при разбивке текста.")
                     except Exception as e:
-                        st.error(f"Ошибка кросс-анализа: {e}")
+                        st.error(f"❌ Ошибка создания PDF: {e}")
 st.divider()
 st.subheader("📚 История и Тренды (База данных)")
 
