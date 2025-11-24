@@ -19,8 +19,10 @@ from rich.text import Text
 from rich.table import Table
 from rich import box
 import datetime
+from memory import MemoryHandler
 
 console = Console()
+memory = MemoryHandler()
 
 def print_rich_card(item: dict):
     title = item.get('title') or "Без названия"
@@ -79,12 +81,23 @@ def print_rich_card(item: dict):
 
     console.print(panel)
 
-async def get_ai_analyzis(text: str) -> Optional[str]:
+async def get_ai_analyzis(text: str, context: str = "") -> Optional[str]:
     if not text or len(text) < 100:
         return None
+
+    memory_block = ""
+    if context:
+        memory_block = f"""
+        ВАЖНО! У тебя есть ДОЛГОСРОЧНАЯ ПАМЯТЬ о прошлых событиях.
+        Вот что мы уже знаем по похожей теме из базы данных:
+        {context}
+
+        Используй этот контекст, чтобы заметить противоречия (если новая статья противоречит старым фактам) или подтвердить тренд.
+        """
     # model = genai.GenerativeModel('gemini-2.5-flash')
     prompt = f"""
     Проанализируй этот новостной текст.
+    {memory_block}
     ВАЖНО: Твой ответ ОБЯЗАН начинаться строго с такой строки:
     SCORE: [число от 0 до 100]%
     Далее напиши краткий анализ:
@@ -249,7 +262,10 @@ async def fetch_and_parse_url(client: httpx.AsyncClient, url: str, semaphore: as
             else:
                 report_item['text_content'] = article.text
                 if show_logs: logger.info("Отправляю текст в AI...")
-                ai_result = await get_ai_analyzis(article.text)
+                past_context = memory.find_similar_context(article.text[:500])
+                if past_context and show_logs:
+                    logger.info("🧠 Найден контекст из прошлого!")
+                ai_result = await get_ai_analyzis(article.text, context=past_context)
                 if ai_result:
                     report_item['ai_analysis'] = ai_result
                     if show_logs: logger.success("AI анализ получен!")
@@ -294,6 +310,13 @@ async def fetch_and_parse_url(client: httpx.AsyncClient, url: str, semaphore: as
                         if show_logs: logger.warning(f"Найдена строка даты, но не удалось разобрать: {raw_date_str}")
                 else:
                     if show_logs: logger.warning("Дата публикации не найдена")
+            if report_item.get('text_content'):
+                memory.add_article({
+                    'url': url,
+                    'title': title or article.title,
+                    'text_content': article.text,
+                    'published_date': report_item.get('published_date')
+                })
             report_item['status'] = 'Success'
             if show_logs:
                 logger.success(f"{final_rating}")

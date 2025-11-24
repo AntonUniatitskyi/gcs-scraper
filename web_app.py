@@ -7,7 +7,17 @@ from config import API_KEY, SEARCH_ENGINE_ID
 from database import DatabaseHandler
 import plotly.express as px
 from report_generator import create_pdf
+import digest_generator  # Убедитесь, что этот файл создан рядом
 
+# === КОНФИГУРАЦИЯ СТРАНИЦЫ ===
+st.set_page_config(
+    page_title="AI News Analyzer",
+    page_icon="🛡️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# === СТИЛИ И HELPER ФУНКЦИИ ===
 def color_rating(val):
     if not isinstance(val, str): return ''
     if 'Высокое доверие' in val:
@@ -18,14 +28,19 @@ def color_rating(val):
         return 'background-color: #fff3cd; color: #856404'  # Yellow
     return ''
 
-st.set_page_config(page_title="Анализатор Новостей", page_icon="🛡️", layout="wide")
-st.title("🛡️ AI-Анализатор Новостей и Пропаганды")
-
+# Инициализация БД
 db = DatabaseHandler()
 
-async def run_analysis(query, num_results):
+# === ЛОГИКА ПОИСКА ===
+async def run_search_process(query, num_results):
     st.session_state.is_running = True
     st.session_state.report_data = None
+
+    # Очистка прошлых результатов анализа AI
+    if 'last_cross_check' in st.session_state:
+        del st.session_state['last_cross_check']
+    if 'last_digest' in st.session_state:
+        del st.session_state['last_digest']
 
     status_placeholder = st.empty()
     status_placeholder.info(f"🔎 Ищу {num_results} результатов для: **{query}**...")
@@ -44,7 +59,7 @@ async def run_analysis(query, num_results):
         return
 
     links_count = len(results_data['items'])
-    status_placeholder.info(f"🔗 Найдено {links_count} ссылок. Запускаю анализ AI и парсинг...")
+    status_placeholder.info(f"🔗 Найдено {links_count} ссылок. Читаю и анализирую контент...")
 
     final_report_data = await parser.run_parser(results_data, query, show_logs=False)
 
@@ -52,24 +67,38 @@ async def run_analysis(query, num_results):
     status_placeholder.success(f"✅ Анализ {links_count} статей завершен!")
     st.session_state.is_running = False
 
+# === ИНИЦИАЛИЗАЦИЯ SESSION STATE ===
 if 'is_running' not in st.session_state:
     st.session_state.is_running = False
 if 'report_data' not in st.session_state:
     st.session_state.report_data = None
 
+# ==========================================
+#                  SIDEBAR
+# ==========================================
 with st.sidebar:
+    st.title("🛡️ AI-Scanner")
+    st.markdown("---")
+
     st.header("🔍 Параметры")
-    search_query = st.text_input("Поисковый запрос", key="search_query")
-    num_results = st.slider("Количество результатов", 1, 10, 5)
-    if st.button("🚀 Начать Анализ", disabled=st.session_state.is_running, type="primary"):
+    search_query = st.text_input("Поисковый запрос", key="search_query", placeholder="Например: Выборы в США")
+    num_results = st.slider("Количество источников", 1, 10, 5)
+
+    st.markdown("###")
+
+    if st.button("🚀 Начать Анализ", disabled=st.session_state.is_running, type="primary", use_container_width=True):
         if search_query:
             try:
-                asyncio.run(run_analysis(search_query, num_results))
-            except RuntimeError as e:
+                # Запуск асинхронной функции в Streamlit
+                asyncio.run(run_search_process(search_query, num_results))
+            except RuntimeError:
+                # Fallback для сложных event loops
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                loop.run_until_complete(run_analysis(search_query, num_results))
+                loop.run_until_complete(run_search_process(search_query, num_results))
                 loop.close()
+        else:
+            st.warning("Введите запрос.")
 
     st.markdown("---")
     st.subheader("📊 Статистика Базы")
@@ -77,112 +106,167 @@ with st.sidebar:
     col1, col2 = st.columns(2)
     col1.metric("Всего", stats['total'])
     col2.metric("Доверенные", stats['trusted'])
-    st.metric("Подозрительные / Пропаганда", stats['fake'], delta_color="inverse")
+    st.metric("⚠️ Фейки / Пропаганда", stats['fake'], delta_color="inverse")
 
+# ==========================================
+#                MAIN CONTENT
+# ==========================================
+
+st.title("📡 Центр Анализа Информации")
+st.markdown("OSINT-инструмент для выявления манипуляций в СМИ.")
+
+# 1. ВЫВОД ТЕКУЩИХ РЕЗУЛЬТАТОВ
 if st.session_state.report_data:
     st.divider()
-    st.subheader("📍 Результаты текущего поиска")
+    st.subheader("📍 Результаты сканирования")
 
     df_report = pd.DataFrame(st.session_state.report_data)
+
+    # Отображаем таблицу с раскраской
     st.dataframe(
         df_report.style.map(color_rating, subset=['rating']),
         use_container_width=True,
         column_config={
             "url": st.column_config.LinkColumn("URL", display_text="Открыть ссылку"),
-            "ai_analysis": st.column_config.TextColumn("AI Анализ", width="large")
-        }
+            "title": st.column_config.TextColumn("Заголовок", width="medium"),
+            "ai_analysis": st.column_config.TextColumn("AI Анализ", width="large"),
+            "rating": st.column_config.TextColumn("Рейтинг", width="small"),
+        },
+        hide_index=True
     )
 
-    st.markdown("#### ⚔️ Сводный анализ (Cross-Check)")
+    st.markdown("###")
 
-    with st.expander("ℹ️ Что это?", expanded=False):
-        st.info("AI сравнит тексты только что найденных статей, найдет противоречия в фактах и манипуляции.")
+    # 2. AI ЛАБОРАТОРИЯ (Tabs Interface)
+    with st.container(border=True):
+        st.subheader("🧠 AI-Лаборатория")
+        st.caption("Выберите режим глубокого анализа собранных данных")
 
-    if st.button("✨ Сгенерировать сводный отчет"):
-        current_data = st.session_state.get('report_data')
+        tab_check, tab_digest = st.tabs(["⚔️ Кросс-анализ (Поиск правды)", "📰 Умный Дайджест (Суть)"])
 
-        if not current_data:
-             st.error("Ошибка данных.")
-        else:
-            has_text = any(item.get('text_content') for item in current_data)
-            if not has_text:
-                st.error("⚠️ Нет текстов для анализа. Возможно, сайты заблокировали парсер.")
-            else:
-                cross_check_result = ""
-                with st.spinner("🤖 AI читает статьи и ищет истину..."):
+        # --- Вкладка 1: Кросс-Анализ ---
+        with tab_check:
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                st.info("🤖 AI сравнит тексты всех статей, найдет противоречия в цифрах, датах и выявит манипуляции.")
+            with c2:
+                st.write("") # Отступ
+                btn_cross = st.button("⚔️ Сравнить источники", type="primary", use_container_width=True)
+
+            # Логика Кросс-анализа
+            if btn_cross:
+                current_data = st.session_state.get('report_data')
+                has_text = any(item.get('text_content') for item in current_data)
+
+                if not has_text:
+                    st.error("⚠️ Нет текстов для анализа. Сайты могли заблокировать парсер.")
+                else:
+                    with st.status("🕵️ AI читает статьи и ищет несостыковки...", expanded=True) as status:
+                        try:
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            res = loop.run_until_complete(parser.get_cross_check_analysis(current_data))
+                            loop.close()
+
+                            st.session_state['last_cross_check'] = res
+                            status.update(label="✅ Анализ готов!", state="complete", expanded=False)
+                        except Exception as e:
+                            status.update(label="❌ Ошибка", state="error")
+                            st.error(f"Ошибка: {e}")
+
+            # Вывод результата Кросс-анализа (если есть)
+            if 'last_cross_check' in st.session_state:
+                st.markdown(st.session_state['last_cross_check'])
+
+                # Кнопка PDF (появляется только после анализа)
+                st.markdown("---")
+                col_pdf, _ = st.columns([1, 3])
+                with col_pdf:
                     try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        cross_check_result = loop.run_until_complete(
-                            parser.get_cross_check_analysis(current_data)
+                        pdf_bytes = create_pdf(
+                            query=search_query,
+                            articles=st.session_state.get('report_data'),
+                            cross_check_text=st.session_state['last_cross_check']
                         )
-                        loop.close()
-
-                        st.success("Готово!")
-                        with st.container(border=True):
-                            st.markdown(cross_check_result)
-
-                            # pdf_data = create_pdf(
-                            #     query=search_query,
-                            #     articles=current_data,
-                            #     cross_check_text=cross_check_result
-                            # )
-
-                            # st.download_button(
-                            #     label="📄 Скачать PDF отчет",
-                            #     data=pdf_data,
-                            #     file_name="analysis_report.pdf",
-                            #     mime="application/pdf",
-                            #     type="primary"
-                            # )
-                    except Exception as e:
-                        st.error(f"Ошибка кросс-анализа: {e}")
-                if cross_check_result:
-                    try:
-                        with st.spinner("📄 Верстаю PDF отчет..."):
-                            pdf_data = create_pdf(
-                                query=search_query,
-                                articles=current_data,
-                                cross_check_text=cross_check_result
-                            )
-
                         st.download_button(
                             label="📄 Скачать PDF отчет",
-                            data=pdf_data,
-                            file_name="analysis_report.pdf",
-                            mime="application/pdf",
-                            type="primary"
+                            data=pdf_bytes,
+                            file_name="investigation_report.pdf",
+                            mime="application/pdf"
                         )
-                    except IndexError:
-                        st.error("❌ Ошибка структуры данных при создании PDF (IndexError).")
-                        # st.warning("Совет: Скорее всего, проблема в report_generator.py при разбивке текста.")
                     except Exception as e:
-                        st.error(f"❌ Ошибка создания PDF: {e}")
+                        st.warning(f"Не удалось создать PDF: {e}")
+
+        # --- Вкладка 2: Умный Дайджест ---
+        with tab_digest:
+            c1, c2 = st.columns([3, 1])
+
+            with c1:
+                cynicism = st.slider(
+                    "🎚️ Уровень цинизма (Фильтр шума)",
+                    0, 100, 50,
+                    format="%d%%"
+                )
+                if cynicism < 30:
+                    st.caption("🎭 *Режим: Сторителлинг (Контекст, история, мнения)*")
+                elif cynicism < 70:
+                    st.caption("⚖️ *Режим: Информбюро (Баланс фактов и контекста)*")
+                else:
+                    st.caption("💀 *Режим: Сухой остаток (Только факты, без эмоций)*")
+
+            with c2:
+                st.write("")
+                st.write("")
+                btn_digest = st.button("⚡ Создать сводку", type="primary", use_container_width=True)
+
+            if btn_digest:
+                current_data = st.session_state.get('report_data')
+                if not current_data:
+                    st.error("Нет данных.")
+                else:
+                    with st.spinner(f"🔪 Вырезаю лишнее (Цинизм: {cynicism}%)..."):
+                        try:
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            digest_res = loop.run_until_complete(
+                                digest_generator.generate_cynical_digest(current_data, cynicism)
+                            )
+                            loop.close()
+                            st.session_state['last_digest'] = digest_res
+                        except Exception as e:
+                            st.error(f"Ошибка: {e}")
+
+            # Вывод результата Дайджеста
+            if 'last_digest' in st.session_state:
+                st.success("Дайджест сформирован!")
+                with st.container(border=True):
+                    st.markdown(st.session_state['last_digest'])
+
+
+# 3. ИСТОРИЯ (НИЖНЯЯ ЧАСТЬ)
 st.divider()
-st.subheader("📚 История и Тренды (База данных)")
+st.subheader("📚 Архив расследований")
 
 df_history = db.get_all_articles_df()
 
 if not df_history.empty:
+    # Предобработка данных для графиков
     df_history['clean_rating'] = df_history['rating'].astype(str).apply(
         lambda x: x.split('|')[0].replace('Рейтинг:', '').split('(')[0].strip()
     )
+    df_history['published_date'] = pd.to_datetime(df_history['published_date'], errors='coerce', utc=True)
+    df_history['date_parsed'] = df_history['published_date'].dt.date
 
-    df_history['published_date'] = df_history['published_date'].astype(str)
-    df_history['published_date_dt'] = pd.to_datetime(df_history['published_date'], errors='coerce', utc=True)
-    df_history['date_parsed'] = df_history['published_date_dt'].dt.date
+    tab_chart, tab_data = st.tabs(["📈 Визуализация", "📋 Таблица данных"])
 
-    tab1, tab2 = st.tabs(["📈 Визуализация", "📋 Таблица истории"])
-
-    with tab1:
+    with tab_chart:
         col1, col2 = st.columns(2)
-
         with col1:
             rating_counts = df_history['clean_rating'].value_counts().reset_index()
             rating_counts.columns = ['Источник', 'Кол-во']
             fig_pie = px.pie(
                 rating_counts, values='Кол-во', names='Источник',
-                title='Доверие к источникам', hole=0.4,
+                title='Репутация источников в базе', hole=0.4,
                 color='Источник',
                 color_discrete_map={
                     'Высокое доверие': '#28a745',
@@ -201,14 +285,14 @@ if not df_history.empty:
                 date_counts = date_counts.sort_values('Дата')
                 fig_bar = px.bar(
                     date_counts, x='Дата', y='Статей',
-                    title='Хронология публикаций',
+                    title='Динамика публикаций',
                     color_discrete_sequence=['#3498db']
                 )
                 st.plotly_chart(fig_bar, use_container_width=True)
             else:
-                st.info("Мало данных с датами для графика.")
+                st.info("Недостаточно данных с датами для графика.")
 
-    with tab2:
+    with tab_data:
         st.dataframe(
             df_history.style.map(color_rating, subset=['rating']),
             use_container_width=True,

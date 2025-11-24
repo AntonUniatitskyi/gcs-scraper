@@ -15,3 +15,5 @@ report.json
 
 *.sqlite3
 *.db
+
+chroma_db/
