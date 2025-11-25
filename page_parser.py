@@ -1,7 +1,8 @@
-import httpx
 import asyncio
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
+import ssl
+import httpx
 import os
 import csv
 import json
@@ -20,9 +21,13 @@ from rich.table import Table
 from rich import box
 import datetime
 from memory import MemoryHandler
+from curl_cffi.requests import AsyncSession
+from playwright.async_api import async_playwright
 
 console = Console()
 memory = MemoryHandler()
+
+PLAYWRIGHT_SEMAPHORE = asyncio.Semaphore(1)
 
 def print_rich_card(item: dict):
     title = item.get('title') or "Без названия"
@@ -80,6 +85,118 @@ def print_rich_card(item: dict):
     )
 
     console.print(panel)
+
+def get_dirty_ssl_context():
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
+    except Exception:
+        try:
+            ctx.set_ciphers("DEFAULT")
+        except Exception:
+            pass
+    return ctx
+
+
+async def fetch_via_playwright(url: str) -> tuple[str, str]:
+    async with PLAYWRIGHT_SEMAPHORE:
+        logger.warning(f"🎭 Запуск Playwright для: {urlparse(url).netloc}")
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=[
+                        '--disable-blink-features=AutomationControlled',
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox'
+                    ]
+                )
+                context = await browser.new_context(
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    viewport={'width': 1920, 'height': 1080}
+                )
+                page = await context.new_page()
+                await page.route("**/*", lambda route: (
+                    route.abort()
+                    if route.request.resource_type in ["image", "stylesheet", "font", "media", "ad"]
+                    else route.continue_()
+                ))
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                    await page.wait_for_timeout(3000)
+                except Exception as e:
+                    logger.warning(f"Playwright timeout/error on goto: {e}, but trying to get content anyway.")
+
+                content = await page.content()
+                await browser.close()
+                return content, "playwright"
+
+        except Exception as e:
+            logger.error(f"❌ Playwright сломался на {url}: {e}")
+            raise e
+
+def is_js_stub(html: str) -> bool:
+    if not html or len(html) < 500:
+        return True
+
+    soup = BeautifulSoup(html, 'lxml')
+    text = soup.get_text().lower()
+
+    triggers = [
+        "enable javascript",
+        "javascript is disabled",
+        "browser not supported",
+        "please enable cookies",
+        "включите javascript"
+    ]
+    if len(text) < 1000 and any(t in text for t in triggers):
+        return True
+    return False
+
+
+async def fetch_with_fallback(url: str, curl_client: AsyncSession) -> tuple[str, str]:
+    html_text = ""
+    source = ""
+    error_msg = ""
+    try:
+        response = await curl_client.get(url, timeout=15)
+        response.raise_for_status()
+        html_text = response.text
+        source = "curl_cffi"
+
+        if is_js_stub(html_text):
+            logger.info(f"🤔 {urlparse(url).netloc} требует JS. Переключаюсь на Playwright...")
+            raise Exception("JS required")
+
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "tls" in error_msg or "ssl" in error_msg or "handshake" in error_msg or "connect error" in error_msg:
+            logger.warning(f"⚠️ SSL ошибка curl_cffi на {urlparse(url).netloc}. Пробую fallback на httpx...")
+        elif "js required" in error_msg:
+             pass
+        else:
+             logger.warning(f"Ошибка curl_cffi: {e}. Пробуем дальше...")
+
+    if not html_text and "js required" not in error_msg:
+            async with httpx.AsyncClient(verify=get_dirty_ssl_context(), follow_redirects=True) as fallback_client:
+                fallback_client.headers.update({
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                })
+                try:
+                    resp = await fallback_client.get(url, timeout=15)
+                    resp.raise_for_status()
+                    return resp.text, "httpx_fallback"
+                except Exception as ex:
+                    raise Exception(f"Fallback failed: {ex}")
+    if not html_text or is_js_stub(html_text):
+        try:
+            html_text, source = await fetch_via_playwright(url)
+        except Exception as final_e:
+            raise Exception(f"Все методы (Curl, Httpx, Playwright) провалились. Последняя ошибка: {final_e}")
+
+    return html_text, source
 
 async def get_ai_analyzis(text: str, context: str = "") -> Optional[str]:
     if not text or len(text) < 100:
@@ -228,7 +345,7 @@ def analyze_title_sentiment(title: str | None) -> str:
         return " (Кликбейт: ALL CAPS)"
     return ""
 
-async def fetch_and_parse_url(client: httpx.AsyncClient, url: str, semaphore: asyncio.Semaphore, show_logs: bool) -> dict:
+async def fetch_and_parse_url(client: AsyncSession, url: str, semaphore: asyncio.Semaphore, show_logs: bool) -> dict:
     async with semaphore:
         if show_logs:
             logger.info(f"Обрабатываем: {url}")
@@ -246,11 +363,10 @@ async def fetch_and_parse_url(client: httpx.AsyncClient, url: str, semaphore: as
         }
         ai_score_short = ""
         try:
-            response = await client.get(url, timeout=10)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, "lxml")
+            html_text, method = await fetch_with_fallback(url, client)
+            soup = BeautifulSoup(html_text, "lxml")
             article = Article(url)
-            article.set_html(response.text)
+            article.set_html(html_text)
             article.parse()
 
             if "youtube.com" in url or "youtu.be" in url:
@@ -340,23 +456,14 @@ async def run_parser(search_results_data, query, show_logs: bool):
     links = [item["link"] for item in search_results_data.get("items", [])]
 
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
 
     semaphore = asyncio.Semaphore(3)
     tasks = []
     if not show_logs:
         console.print(f"[bold cyan]🚀 Запуск анализа для {len(links)} ссылок...[/bold cyan]\n")
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True, verify=False, http2=True, trust_env=False,) as client:
+    async with AsyncSession(impersonate="chrome110", headers=headers, verify=False) as client:
         for url in links:
             tasks.append(fetch_and_parse_url(client, url, semaphore, show_logs))
         if show_logs: logger.info(f"Запускаю {len(tasks)} задач одновременно...")
