@@ -8,8 +8,8 @@ from database import DatabaseHandler
 import plotly.express as px
 from report_generator import create_pdf
 import digest_generator  # Убедитесь, что этот файл создан рядом
+from trends_client import TrendsClient
 
-# === КОНФИГУРАЦИЯ СТРАНИЦЫ ===
 st.set_page_config(
     page_title="AI News Analyzer",
     page_icon="🛡️",
@@ -17,7 +17,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# === СТИЛИ И HELPER ФУНКЦИИ ===
 def color_rating(val):
     if not isinstance(val, str): return ''
     if 'Высокое доверие' in val:
@@ -28,15 +27,12 @@ def color_rating(val):
         return 'background-color: #fff3cd; color: #856404'  # Yellow
     return ''
 
-# Инициализация БД
 db = DatabaseHandler()
 
-# === ЛОГИКА ПОИСКА ===
 async def run_search_process(query, num_results):
     st.session_state.is_running = True
     st.session_state.report_data = None
 
-    # Очистка прошлых результатов анализа AI
     if 'last_cross_check' in st.session_state:
         del st.session_state['last_cross_check']
     if 'last_digest' in st.session_state:
@@ -65,6 +61,54 @@ async def run_search_process(query, num_results):
 
     st.session_state.report_data = final_report_data
     status_placeholder.success(f"✅ Анализ {links_count} статей завершен!")
+    st.session_state.is_running = False
+
+async def run_daily_monitor():
+    st.session_state.is_running = True
+    st.session_state.report_data = [] # Очищаем старое
+
+    # Очистка AI результатов
+    if 'last_cross_check' in st.session_state: del st.session_state['last_cross_check']
+    if 'last_digest' in st.session_state: del st.session_state['last_digest']
+
+    status_box = st.empty()
+    progress_bar = st.progress(0)
+
+    try:
+        status_box.info("📰 Читаю заголовки Google News...")
+        # Получаем топ-3 темы (можно изменить limit в trends_client.py или передать аргумент)
+        trends = TrendsClient().get_top_trends(limit=3)
+
+        if not trends:
+            status_box.error("Не удалось получить тренды.")
+            st.session_state.is_running = False
+            return
+
+        all_articles = []
+        search_client = SearchClient(API_KEY, SEARCH_ENGINE_ID)
+
+        for i, topic in enumerate(trends):
+            status_box.info(f"🕵️ Анализирую тему ({i+1}/{len(trends)}): **{topic}**")
+
+            # Ищем по 2 статьи на каждую тему
+            results = search_client.search(topic, num_results=2, show_logs=False)
+
+            if results and results.get('items'):
+                parsed = await parser.run_parser(results, topic, show_logs=False)
+                # Добавляем пометку о теме, чтобы потом было понятно
+                for item in parsed:
+                    item['query_topic'] = topic
+                all_articles.extend(parsed)
+
+            # Обновляем прогресс
+            progress_bar.progress((i + 1) / len(trends))
+
+        st.session_state.report_data = all_articles
+        status_box.success(f"✅ Готово! Собрано статей: {len(all_articles)}")
+
+    except Exception as e:
+        status_box.error(f"Ошибка мониторинга: {e}")
+
     st.session_state.is_running = False
 
 # === ИНИЦИАЛИЗАЦИЯ SESSION STATE ===
@@ -101,6 +145,19 @@ with st.sidebar:
             st.warning("Введите запрос.")
 
     st.markdown("---")
+    st.header("🔥 Авто-Мониторинг")
+    st.caption("Автоматический сбор главных новостей за 24 часа.")
+
+    if st.button("🌍 Картина дня (UA)", disabled=st.session_state.is_running, use_container_width=True):
+        try:
+            asyncio.run(run_daily_monitor())
+            st.rerun()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(run_daily_monitor())
+            loop.close()
+            st.rerun()
     st.subheader("📊 Статистика Базы")
     stats = db.get_stats()
     col1, col2 = st.columns(2)
@@ -108,21 +165,16 @@ with st.sidebar:
     col2.metric("Доверенные", stats['trusted'])
     st.metric("⚠️ Фейки / Пропаганда", stats['fake'], delta_color="inverse")
 
-# ==========================================
-#                MAIN CONTENT
-# ==========================================
 
 st.title("📡 Центр Анализа Информации")
 st.markdown("OSINT-инструмент для выявления манипуляций в СМИ.")
 
-# 1. ВЫВОД ТЕКУЩИХ РЕЗУЛЬТАТОВ
 if st.session_state.report_data:
     st.divider()
     st.subheader("📍 Результаты сканирования")
 
     df_report = pd.DataFrame(st.session_state.report_data)
 
-    # Отображаем таблицу с раскраской
     st.dataframe(
         df_report.style.map(color_rating, subset=['rating']),
         use_container_width=True,
@@ -137,14 +189,12 @@ if st.session_state.report_data:
 
     st.markdown("###")
 
-    # 2. AI ЛАБОРАТОРИЯ (Tabs Interface)
     with st.container(border=True):
         st.subheader("🧠 AI-Лаборатория")
         st.caption("Выберите режим глубокого анализа собранных данных")
 
         tab_check, tab_digest = st.tabs(["⚔️ Кросс-анализ (Поиск правды)", "📰 Умный Дайджест (Суть)"])
 
-        # --- Вкладка 1: Кросс-Анализ ---
         with tab_check:
             c1, c2 = st.columns([3, 1])
             with c1:
@@ -153,7 +203,6 @@ if st.session_state.report_data:
                 st.write("") # Отступ
                 btn_cross = st.button("⚔️ Сравнить источники", type="primary", use_container_width=True)
 
-            # Логика Кросс-анализа
             if btn_cross:
                 current_data = st.session_state.get('report_data')
                 has_text = any(item.get('text_content') for item in current_data)
@@ -174,11 +223,8 @@ if st.session_state.report_data:
                             status.update(label="❌ Ошибка", state="error")
                             st.error(f"Ошибка: {e}")
 
-            # Вывод результата Кросс-анализа (если есть)
             if 'last_cross_check' in st.session_state:
                 st.markdown(st.session_state['last_cross_check'])
-
-                # Кнопка PDF (появляется только после анализа)
                 st.markdown("---")
                 col_pdf, _ = st.columns([1, 3])
                 with col_pdf:
@@ -197,7 +243,6 @@ if st.session_state.report_data:
                     except Exception as e:
                         st.warning(f"Не удалось создать PDF: {e}")
 
-        # --- Вкладка 2: Умный Дайджест ---
         with tab_digest:
             c1, c2 = st.columns([3, 1])
 
@@ -236,21 +281,17 @@ if st.session_state.report_data:
                         except Exception as e:
                             st.error(f"Ошибка: {e}")
 
-            # Вывод результата Дайджеста
             if 'last_digest' in st.session_state:
                 st.success("Дайджест сформирован!")
                 with st.container(border=True):
                     st.markdown(st.session_state['last_digest'])
 
-
-# 3. ИСТОРИЯ (НИЖНЯЯ ЧАСТЬ)
 st.divider()
 st.subheader("📚 Архив расследований")
 
 df_history = db.get_all_articles_df()
 
 if not df_history.empty:
-    # Предобработка данных для графиков
     df_history['clean_rating'] = df_history['rating'].astype(str).apply(
         lambda x: x.split('|')[0].replace('Рейтинг:', '').split('(')[0].strip()
     )
